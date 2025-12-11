@@ -493,8 +493,7 @@ validate_extra_files() {
     return 1
   fi
   if [[ "x${extra_cover_file}" == "x" ]] ; then
-    log "ERROR Cover File NOT Found"
-    return 1
+    log "WARN Cover File NOT Found - conversion will continue without cover art"
   fi
 
   # Test for library file
@@ -792,11 +791,13 @@ do
   cover_file="${output_directory}/${currentFileNameScheme}.jpg"
   if [ "${continue}" == "0" ]; then
     if [ "${audibleCli}" == "1" ]; then
-      # We have a better quality cover file, copy it.
-      if [ "$((${loglevel} > 1))" == "1" ]; then
-        log "Copy cover file to ${cover_file}..."
+      # We have a better quality cover file, copy it if it exists.
+      if [[ "x${extra_cover_file}" != "x" ]] && [[ -r "${extra_cover_file}" ]]; then
+        if [ "$((${loglevel} > 1))" == "1" ]; then
+          log "Copy cover file to ${cover_file}..."
+        fi
+        cp "${extra_cover_file}" "${cover_file}"
       fi
-      cp "${extra_cover_file}" "${cover_file}"
     else
       # Audible-cli not used, extract the cover from the aax file
       if [ "$((${loglevel} > 1))" == "1" ]; then
@@ -807,15 +808,17 @@ do
   fi
 
   extra_crop_cover=''
-  cover_width=$(ffprobe -i "${cover_file}" 2>&1 | $GREP -Po "[0-9]+(?=x[0-9]+)" | tail -n 1)
-  if (( ${cover_width} % 2 == 1 )); then
-    if [ "$((${loglevel} > 1))" == "1" ]; then
-      log "Cover ${cover_file} has odd width ${cover_width}, setting extra_crop_cover to make even."
+  if [ -f "${cover_file}" ]; then
+    cover_width=$(ffprobe -i "${cover_file}" 2>&1 | $GREP -Po "[0-9]+(?=x[0-9]+)" | tail -n 1)
+    if (( ${cover_width} % 2 == 1 )); then
+      if [ "$((${loglevel} > 1))" == "1" ]; then
+        log "Cover ${cover_file} has odd width ${cover_width}, setting extra_crop_cover to make even."
+      fi
+      # We now set a variable, ${extra_crop_cover}, which contains an additional
+      # ffmpeg flag. It crops the cover so the width and the height is divisible by two.
+      # Set the flag only if we use a cover art with an odd width.
+      extra_crop_cover='-vf crop=trunc(iw/2)*2:trunc(ih/2)*2'
     fi
-    # We now set a variable, ${extra_crop_cover}, which contains an additional
-    # ffmpeg flag. It crops the cover so the width and the height is divisible by two.
-    # Set the flag only if we use a cover art with an odd width.
-    extra_crop_cover='-vf crop=trunc(iw/2)*2:trunc(ih/2)*2'
   fi
 
   # -----
@@ -874,7 +877,12 @@ do
           chapter_title="$(eval echo "${chapterNameScheme}")"
         else
           # The Default
-          chapter_title="${title}-$(printf %0${#chaptercount}d $chapternum) ${chapter}"
+          # chapter_title="${title}-$(printf %0${#chaptercount}d $chapternum) ${chapter}"
+          # echo "output_directory: ${output_directory}"
+          book_title="$(basename "$(dirname "${output_directory}")")"
+          # echo "book_title: ${book_title}"
+          chapter_title="${book_title}-$(printf %0${#chaptercount}d $chapternum)"
+          # echo "chapter_title: ${chapter_title}"
         fi
         chapter_file="${output_directory}/${chapter_title}.${extension}"
 
@@ -909,25 +917,42 @@ do
           if [ "$((${loglevel} > 1))" == "1" ]; then
             log "Splitting chapter ${chapternum}/${chaptercount} start:${chapter_start%?}(s) end:${chapter_end}(s)"
           fi
-          </dev/null "$FFMPEG" -loglevel quiet \
-            -nostats \
-            ${split_input} \
-            -i "${output_file}" \
-            -i "${cover_file}" \
-            ${extra_crop_cover} \
-            ${split_output} \
-            -map 0:0 \
-            -map 1:0 \
-            -acodec ${chapter_codec} \
-            -metadata:s:v title="Album cover" \
-            -metadata:s:v comment="Cover (front)" \
-            -metadata track="${chapternum}" \
-            -metadata title="${chapter}" \
-            -metadata:s:a title="${chapter}" \
-            -metadata:s:a track="${chapternum}" \
-            -map_chapters -1 \
-            -f ${container} \
-            "${chapter_file}"
+          if [ -f "${cover_file}" ]; then
+            </dev/null "$FFMPEG" -loglevel quiet \
+              -nostats \
+              ${split_input} \
+              -i "${output_file}" \
+              -i "${cover_file}" \
+              ${extra_crop_cover} \
+              ${split_output} \
+              -map 0:0 \
+              -map 1:0 \
+              -acodec ${chapter_codec} \
+              -metadata:s:v title="Album cover" \
+              -metadata:s:v comment="Cover (front)" \
+              -metadata track="${chapternum}" \
+              -metadata title="${chapter}" \
+              -metadata:s:a title="${chapter}" \
+              -metadata:s:a track="${chapternum}" \
+              -map_chapters -1 \
+              -f ${container} \
+              "${chapter_file}"
+          else
+            </dev/null "$FFMPEG" -loglevel quiet \
+              -nostats \
+              ${split_input} \
+              -i "${output_file}" \
+              ${split_output} \
+              -map 0:0 \
+              -acodec ${chapter_codec} \
+              -metadata track="${chapternum}" \
+              -metadata title="${chapter}" \
+              -metadata:s:a title="${chapter}" \
+              -metadata:s:a track="${chapternum}" \
+              -map_chapters -1 \
+              -f ${container} \
+              "${chapter_file}"
+          fi
           # -----
           if [ "$((${loglevel} < 2))" == "1" ]; then
             progressbar ${chapternum} ${chaptercount}
