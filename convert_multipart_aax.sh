@@ -35,6 +35,7 @@ It can merge them and organize chapters into sub-books if JSON contains book nam
 Options:
   --book "Title"      Process only books whose folder contains this text (required)
   --merge-only        Only merge AAX files, don't split into chapters yet
+  --split-existing "file.mp3"  Split an existing merged MP3 file using JSON chapter data
   --split-by-book     Parse chapter titles and organize by book name (e.g., "The Magician's Nephew")
   --decode-first      Decode each AAX to MP3 first, then combine (slower but more reliable)
   --dry-run           Show what would run without converting
@@ -55,14 +56,22 @@ Examples:
   # Just merge the files for inspection:
   $0 --book "Narnia" --merge-only --keep-merged
 
+  # Split an existing merged MP3 file:
+  $0 --book "Narnia" --split-existing "/path/to/merged.mp3" --use-cli-data
+
   # Dry run to see what would happen:
   $0 --book "Dune" --dry-run
 
 Directory Structure:
   Input:  BASE_DIR/Author/Book_Title/*.aax (multiple files)
-          BASE_DIR/Author/Book_Title/*-chapters.json (optional, from audible-cli)
+          BASE_DIR/Author/Book_Title/*-chapters.json (required for --use-cli-data)
   Output: BASE_DIR/Author/Book_Title/chapters/*.mp3 (standard)
           BASE_DIR/Author/Book_Title/chapters/BookName/*.mp3 (with --split-by-book)
+  
+  For --split-existing:
+  Input:  /path/to/merged.mp3 (your existing merged file)
+          BASE_DIR/Author/Book_Title/*-chapters.json (required)
+  Output: BASE_DIR/Author/Book_Title/chapters/*.mp3
 EOF
     exit 1
 }
@@ -75,6 +84,7 @@ SPLIT_BY_BOOK=false
 KEEP_MERGED=false
 USE_CLI_DATA=false
 DECODE_FIRST=false
+SPLIT_EXISTING=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -84,6 +94,11 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --merge-only)   MERGE_ONLY=true ; shift ;;
+        --split-existing)
+            [[ -z "${2:-}" ]] && echo "Error: --split-existing requires a file path" && usage
+            SPLIT_EXISTING="$2"
+            shift 2
+            ;;
         --split-by-book) SPLIT_BY_BOOK=true ; shift ;;
         --keep-merged)  KEEP_MERGED=true ; shift ;;
         --use-cli-data) USE_CLI_DATA=true ; shift ;;
@@ -94,8 +109,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ -z "$BOOK_FILTER" ]]; then
-    echo "ERROR: --book is required"
+if [[ -z "$BOOK_FILTER" ]] && [[ -z "$SPLIT_EXISTING" ]]; then
+    echo "ERROR: --book is required (or use --split-existing with a file path)"
     usage
 fi
 
@@ -104,7 +119,18 @@ if [[ "$SPLIT_BY_BOOK" == true ]] && [[ "$USE_CLI_DATA" == false ]]; then
     exit 1
 fi
 
-if [[ ! -f "$AAXTOMP3" ]]; then
+if [[ -n "$SPLIT_EXISTING" ]]; then
+    if [[ ! -f "$SPLIT_EXISTING" ]]; then
+        echo "ERROR: File not found: $SPLIT_EXISTING"
+        exit 1
+    fi
+    if [[ "$USE_CLI_DATA" == false ]]; then
+        echo "ERROR: --split-existing requires --use-cli-data"
+        exit 1
+    fi
+fi
+
+if [[ ! -f "$AAXTOMP3" ]] && [[ -z "$SPLIT_EXISTING" ]]; then
     echo "ERROR: AAXtoMP3 not found at $AAXTOMP3"
     exit 1
 fi
@@ -122,15 +148,21 @@ if [[ -z "$AUTHCODE" ]]; then
     [[ ! $REPLY =~ ^[Yy]$ ]] && exit 1
 fi
 
-echo "Book filter     : \"$BOOK_FILTER\""
-echo "Merge strategy  : $( [[ "$DECODE_FIRST" == true ]] && echo "Decode-first (reliable)" || echo "Direct merge (fast)" )"
-echo "Merge only      : $MERGE_ONLY"
+if [[ -n "$SPLIT_EXISTING" ]]; then
+    echo "Mode            : Split existing MP3 file"
+    echo "MP3 file        : $SPLIT_EXISTING"
+    echo "Book filter     : $( [[ -n "$BOOK_FILTER" ]] && echo "\"$BOOK_FILTER\"" || echo "(using MP3 location)" )"
+else
+    echo "Book filter     : \"$BOOK_FILTER\""
+    echo "Merge strategy  : $( [[ "$DECODE_FIRST" == true ]] && echo "Decode-first (reliable)" || echo "Direct merge (fast)" )"
+    echo "Merge only      : $MERGE_ONLY"
+fi
 echo "Split by book   : $SPLIT_BY_BOOK"
 echo "Use CLI data    : $USE_CLI_DATA"
-echo "Keep merged     : $KEEP_MERGED"
+[[ -z "$SPLIT_EXISTING" ]] && echo "Keep merged     : $KEEP_MERGED"
 [[ "$DRY_RUN" == true ]] && echo "DRY RUN         : Enabled"
 echo "Base dir        : $BASE_DIR"
-echo "Authcode        : $( [[ -n "$AUTHCODE" ]] && echo "found" || echo "missing" )"
+[[ -z "$SPLIT_EXISTING" ]] && echo "Authcode        : $( [[ -n "$AUTHCODE" ]] && echo "found" || echo "missing" )"
 echo "============================================================"
 
 # Function to split a combined MP3 into chapters using JSON metadata
@@ -645,6 +677,85 @@ process_multipart_book() {
     echo "[COMPLETE] $book_name"
     echo "Output: $chapters_dir"
 }
+
+# Special mode: Split an existing MP3 file
+if [[ -n "$SPLIT_EXISTING" ]]; then
+    echo ""
+    echo "========================================================================"
+    echo "[SPLIT EXISTING] Processing existing MP3 file"
+    echo "========================================================================"
+    echo "MP3 file: $SPLIT_EXISTING"
+    
+    # Determine book directory from the MP3 file location or book filter
+    mp3_dir=$(dirname "$SPLIT_EXISTING")
+    mp3_name=$(basename "$SPLIT_EXISTING" .mp3)
+    
+    # If book filter is provided, use it to find the book directory
+    if [[ -n "$BOOK_FILTER" ]]; then
+        book_dir=$(find "$BASE_DIR" -mindepth 2 -maxdepth 2 -type d -print0 | \
+                   while IFS= read -r -d '' dir; do
+                       if echo "$(basename "$dir")" | grep -iq "$BOOK_FILTER"; then
+                           echo "$dir"
+                           break
+                       fi
+                   done)
+        
+        if [[ -z "$book_dir" ]]; then
+            echo "ERROR: Could not find book directory matching: $BOOK_FILTER"
+            exit 1
+        fi
+    else
+        # Use the MP3 file's directory as the book directory
+        book_dir="$mp3_dir"
+    fi
+    
+    book_name=$(basename "$book_dir")
+    chapters_dir="${book_dir}/chapters"
+    
+    echo "Book directory: $book_dir"
+    echo "Output directory: $chapters_dir"
+    echo ""
+    
+    # Find JSON file
+    json_file="${book_dir}/${book_name}-chapters.json"
+    if [[ ! -r "$json_file" ]]; then
+        json_file=$(find "$book_dir" -maxdepth 1 -name "*-chapters.json" | head -1)
+    fi
+    
+    if [[ ! -r "$json_file" ]]; then
+        echo "ERROR: No JSON chapter file found in $book_dir"
+        echo "       Need *-chapters.json file from audible-cli"
+        exit 1
+    fi
+    
+    echo "Using JSON: $json_file"
+    echo ""
+    
+    # Create output directory
+    mkdir -p "$chapters_dir"
+    
+    # Split the MP3
+    if ! split_mp3_by_json "$SPLIT_EXISTING" "$json_file" "$chapters_dir" "$book_name"; then
+        echo "[FAILED] Chapter splitting failed"
+        exit 1
+    fi
+    
+    echo "[SUCCESS] Chapter splitting complete"
+    
+    # Organize by books if requested
+    if [[ "$SPLIT_BY_BOOK" == true ]]; then
+        echo ""
+        organize_by_books "$chapters_dir" "$json_file"
+    fi
+    
+    echo ""
+    echo "============================================================"
+    echo "[COMPLETE] Split existing MP3 successfully"
+    echo "Output: $chapters_dir"
+    echo "Finished at $(date)"
+    echo "============================================================"
+    exit 0
+fi
 
 # Main execution
 matched_dirs=()
